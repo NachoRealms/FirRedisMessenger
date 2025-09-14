@@ -25,7 +25,9 @@ public class RedisStreamManager {
 
     @Getter private static RedisStreamManager instance;
 
-    @Getter private final String serverId = RedisManager.getInstance().getServerId();
+    private final RedisManager redisManager;
+
+    @Getter private final String serverId;
     @Getter private final StatefulRedisConnection<String, String> connection;
     @Getter private final RedisAsyncCommands<String, String> async;
     @Getter private final RedisCommands<String, String> sync;
@@ -39,9 +41,11 @@ public class RedisStreamManager {
 
 
     // 创建一个 RedisStreamManager
-    public RedisStreamManager(StatefulRedisConnection<String, String> connection) {
+    public RedisStreamManager(RedisManager redisManager) {
         instance = this;
-        this.connection = connection;
+        this.redisManager = redisManager;
+        this.serverId = redisManager.getServerId();
+        this.connection = redisManager.getConnection();
         this.sync = connection.sync();
         this.async = connection.async();
         initRedisMessageDecoder();
@@ -126,7 +130,7 @@ public class RedisStreamManager {
         consumerPool.submit(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 List<StreamMessage<String, String>> messages = sync.xreadgroup(
-                        io.lettuce.core.Consumer.from(groupName, serverId),
+                        Consumer.from(groupName, serverId),
                         XReadArgs.Builder.block(50), // TODO 这个值怎么修改? 现在是轮询吗?
                         XReadArgs.StreamOffset.lastConsumed(topic)
                 );

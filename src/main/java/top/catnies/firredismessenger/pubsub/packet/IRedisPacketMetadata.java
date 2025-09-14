@@ -16,9 +16,10 @@ public interface IRedisPacketMetadata {
 
     /**
      * 数据包消息对应的唯一ID, 每条消息只对应有一个ID
+     *
      * @return 消息ID
      */
-    String messageId();
+    int messageId();
 
     /**
      * 数据包的发送者
@@ -44,7 +45,7 @@ public interface IRedisPacketMetadata {
     /**
      * 回调消息ID, 当消息类型是ACK/Response时, 携带这个数据, 代表需要ACK/Response的消息ID
      */
-    String callbackId();
+    int callbackId();
 
     /**
      * 数据包发送时的时间

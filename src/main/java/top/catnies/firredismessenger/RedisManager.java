@@ -10,10 +10,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class RedisManager {
-    @Getter private static RedisManager instance;
-    @Getter private final RedisUri connectUri;
-
     /* 维护数据 */
+    @Getter private final RedisUri connectUri;
     @Getter private final String serverId; // 服务器唯一ID
     @Getter private RedisClient redisClient; // Redis 客户端
     @Getter private StatefulRedisConnection<String, String> connection; // 普通连接
@@ -25,7 +23,6 @@ public class RedisManager {
 
     // TODO 是否要避免多个相同ID的服务器进行连接?
     public RedisManager(RedisUri connectUri, String serverId) {
-        instance = this;
         this.serverId = serverId;
         this.connectUri = connectUri;
         this.connect();
@@ -40,9 +37,9 @@ public class RedisManager {
             assert connection != null;
             // 缓存 模块功能
             // PubSub 模块功能
-            pubSubManager = new RedisPubSubManager(redisClient);
+            pubSubManager = new RedisPubSubManager(this);
             // Stream 模块功能
-            streamManager = new RedisStreamManager(connection);
+            streamManager = new RedisStreamManager(this);
 
             System.out.println("Redis connection established.");
         } catch (Exception e) {

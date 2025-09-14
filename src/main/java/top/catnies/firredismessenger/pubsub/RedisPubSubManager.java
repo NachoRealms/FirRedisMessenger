@@ -1,6 +1,5 @@
 package top.catnies.firredismessenger.pubsub;
 
-import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.pubsub.RedisPubSubAdapter;
@@ -15,34 +14,39 @@ import top.catnies.firredismessenger.pubsub.packet.impl.AckRedisPacket;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 public class RedisPubSubManager {
-    @Getter private static RedisPubSubManager instance;
     public static final String[] ALL_RECEIVERS = {"*"}; // 表示消息发送给所有接收方
 
     /* 维护数据 */
     @Getter private final StatefulRedisConnection<byte[], byte[]> connection; // 发布消息
     @Getter private final StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection; // 发布订阅连接
     @Getter private final Set<String> subscribedChannels = ConcurrentHashMap.newKeySet(); // 已订阅的频道集合
-//    private final Map<RedisListener, Set<RedisPubSubRouter.SubjectHandler>> registeredListeners = new ConcurrentHashMap<>(); // 通过 Listener 实现类继承的所有监听器
 
     /* 关联对象 */
+    @Getter private final RedisManager redisManager;
     @Getter private final RedisPubSubCallback callbackManager;
-    @Getter private final RedisPubSubRouter messageRouter;
+    @Getter private final RedisPubSubEventBus messageEventBus;
     @Getter private final RedisPacketRegistry packetRegistry;
 
+    /* 消息ID自增器 */
+    private final AtomicInteger MESSAGE_ID_GENERATOR = new AtomicInteger(0);
+    private int nextMessageId() {
+        return MESSAGE_ID_GENERATOR.updateAndGet(prev -> prev == Integer.MAX_VALUE ? 1 : prev + 1);
+    }
+
     // 创建一个 PubSub 管理器
-    public RedisPubSubManager(RedisClient redisClient) {
+    public RedisPubSubManager(RedisManager redisManager) {
+        this.redisManager = redisManager;
         // 初始化链接
-        instance = this;
-        this.connection = redisClient.connect(ByteArrayCodec.INSTANCE);
-        this.pubSubConnection = redisClient.connectPubSub(ByteArrayCodec.INSTANCE);
+        this.connection = redisManager.getRedisClient().connect(ByteArrayCodec.INSTANCE);
+        this.pubSubConnection = redisManager.getRedisClient().connectPubSub(ByteArrayCodec.INSTANCE);
         // 初始化对象
         this.callbackManager = new RedisPubSubCallback();
-        this.messageRouter = new RedisPubSubRouter();
+        this.messageEventBus = new RedisPubSubEventBus(this);
         this.packetRegistry = new RedisPacketRegistry();
         // 注册监听器
         pubSubConnection.addListener(new RedisPubSubAdapter<>() {
@@ -52,31 +56,38 @@ public class RedisPubSubManager {
                 IRedisPacket packet = decodePacket(message);
                 // 看看这个消息是不是发给自己的;
                 for (String receiver : packet.getMetadata().receivers()) {
-                    if (receiver.equals("*") || receiver.equals(RedisManager.getInstance().getServerId())) {
+                    if (receiver.equals("*") || receiver.equals(redisManager.getServerId())) {
                         break;
                     }
                     return;
                 }
                 // 如果是正常消息;
-                // TODO 如果需要response,则分发给response监听器? 还是就这样不管, 让用户自己监听处理?
                 RedisMessageType messageType = RedisMessageType.byId(packet.getMetadata().messageTypeId());
                 if (messageType == RedisMessageType.PUBLISH) {
                     // 如果需要ACK则自动回复;
                     if (packet.getMetadata().requiresAck()) {
                         publishAckPacket(channelStr, packet);
                     }
-                    messageRouter.handlePublishPacket(channelStr, packet);
+                    // 如果需要Response的则交给回复处理器, 然后自动回复;
+                    if (packet.getMetadata().requiresResponse()) {
+                        IRedisPacket iRedisPacket = messageEventBus.handleResponsePacket(channelStr, packet);
+                        if (iRedisPacket != null) {
+                            publishResponsePacket(channelStr, packet, iRedisPacket);
+                        }
+                    }
+                    // 否则就正常处理消息喵;
+                    messageEventBus.handlePublishPacket(channelStr, packet);
                     return;
                 }
                 // 如果是ACK消息, 触发ACK回调;
                 if (messageType == RedisMessageType.ACK) {
-                    String callbackId = packet.getMetadata().callbackId();
+                    int callbackId = packet.getMetadata().callbackId();
                     callbackManager.completeAck(callbackId);
                     return;
                 }
                 // 如果是RESPONSE消息, 触发RESPONSE回调;
                 if (messageType == RedisMessageType.RESPONSE) {
-                    String callbackId = packet.getMetadata().callbackId();
+                    int callbackId = packet.getMetadata().callbackId();
                     callbackManager.completeResponse(callbackId, packet);
                 }
             }
@@ -120,7 +131,7 @@ public class RedisPubSubManager {
      * @param timeoutMillis 多久没收到ACK/RESPONSE时触发超时回调;
      * @param timeoutCallback 当数据包超时时, 触发的回调(需要ack/response至少一个为true)
      */
-    public RedisPacketFuture publishPacket(
+    public void publishPacket(
             @NotNull String channel,
             @NotNull String[] receivers,
             @NotNull IRedisPacket packet,
@@ -136,12 +147,12 @@ public class RedisPubSubManager {
         RedisPacketMetadata metadata = new RedisPacketMetadata(
                 packetId,
                 RedisMessageType.PUBLISH.id(),
-                UUID.randomUUID().toString(),
-                RedisManager.getInstance().getServerId(),
+                nextMessageId(),
+                redisManager.getServerId(),
                 receivers,
                 requireAck,
                 requireResponse,
-                null,
+                -1,
                 System.currentTimeMillis()
         );
         // 创建回调
@@ -157,7 +168,6 @@ public class RedisPubSubManager {
         byte[] encodedPacket = encodePacket(packet);
         // 发布消息
         connection.async().publish(channel.getBytes(StandardCharsets.UTF_8), encodedPacket);
-        return redisPacketFuture;
     }
 
     /**
@@ -172,8 +182,8 @@ public class RedisPubSubManager {
         RedisPacketMetadata metadata = new RedisPacketMetadata(
                 packetId,
                 RedisMessageType.ACK.id(),
-                UUID.randomUUID().toString(),
-                RedisManager.getInstance().getServerId(),
+                nextMessageId(),
+                redisManager.getServerId(),
                 new String[]{originPacket.getMetadata().sender()},
                 false,
                 false,
@@ -199,8 +209,8 @@ public class RedisPubSubManager {
         RedisPacketMetadata metadata = new RedisPacketMetadata(
                 packetId,
                 RedisMessageType.RESPONSE.id(),
-                UUID.randomUUID().toString(),
-                RedisManager.getInstance().getServerId(),
+                nextMessageId(),
+                redisManager.getServerId(),
                 new String[]{originPacket.getMetadata().sender()},
                 false,
                 false,
@@ -269,67 +279,8 @@ public class RedisPubSubManager {
      */
     public void shutdown() {
         if (callbackManager != null) callbackManager.shutdown();
-        if (messageRouter != null) messageRouter.shutdown();
+        if (messageEventBus != null) messageEventBus.shutdown();
         if (pubSubConnection != null) pubSubConnection.close();
     }
 
-//    /**
-//     * 注册对象中所有带 @RedisListener 的方法
-//     */
-//    public void registerListeners(RedisListener listener) {
-//        for (Method method : listener.getClass().getDeclaredMethods()) {
-//            if (method.isAnnotationPresent(RedisSubject.class)) {
-//                registerMethod(listener, method);
-//            }
-//        }
-//    }
-//
-//    /**
-//     * 取消注册给定对象的所有 handler
-//     */
-//    public void unregisterListeners(RedisListener listener) {
-//        Set<RedisPubSubRouter.SubjectHandler> handlers = registeredListeners.remove(listener);
-//        if (handlers == null || handlers.isEmpty()) return;
-//        handlers.forEach(messageRouter::unregisterHandler);
-//    }
-
-
-//    /**
-//     * 将类内的带有 @RedisSubject 的方法进行注册
-//     * @param listener 监听器
-//     * @param method 方法对象
-//     */
-//    private void registerMethod(RedisListener listener, Method method) {
-//        RedisSubject annotation = method.getAnnotation(RedisSubject.class);
-//        if (!method.getParameterTypes()[0].equals(RedisPacket.class)) {
-//            throw new IllegalArgumentException("RedisListener 方法的第一个参数必须是 RedisPacket !");
-//        }
-//
-//        // 解析方法
-//        String subject = annotation.subject();
-//        String channel = annotation.channel();
-//        int priority = annotation.priority();
-//        boolean autoSubscribe = annotation.autoSubscribe();
-//
-//        // lambda方式调用目标方法（处理并发和NPE）
-//        Consumer<RedisPacket> handler = packet -> {
-//            try {
-//                method.setAccessible(true);
-//                method.invoke(listener, packet);
-//            } catch (Exception e) {
-//                System.err.println("Error in Redis message handler: " + e.getMessage());
-//            }
-//        };
-//
-//        // 创建处理器对象, 然后注册
-//        RedisPubSubRouter.SubjectHandler subjectHandler = new RedisPubSubRouter.SubjectHandler(channel, subject, handler, priority);
-//        messageRouter.registerHandler(subjectHandler);
-//
-//        // 自动订阅频道
-//        if (autoSubscribe && !isSubscribed(channel)) {
-//            subscribeChannel(channel);
-//        }
-//
-//        registeredListeners.computeIfAbsent(listener, k -> new LinkedHashSet<>()).add(subjectHandler);
-//    }
 }

@@ -3,7 +3,6 @@ package top.catnies.firredismessenger.pubsub.packet;
 import top.catnies.firredismessenger.util.ByteUtils;
 
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 
 /**
  * 基础元数据实现类;
@@ -11,7 +10,7 @@ import java.nio.charset.StandardCharsets;
  *
  * @param packetId 数据包ID, 每条数据包唯一;
  * @param messageTypeId 消息类型, 例如是ACK, PUBLISH, 或者是RESPONSE;
- * @param messageId 消息ID, 是UUID的字符串化;
+ * @param messageId 消息ID, 按照发送者的客户端逐渐递增;
  * @param sender 数据包的发送人
  * @param receivers 数据包的接收者们
  * @param requiresAck 是否需要收到方自动ACK
@@ -21,12 +20,12 @@ import java.nio.charset.StandardCharsets;
 public record RedisPacketMetadata(
         int packetId,
         int messageTypeId,
-        String messageId,
+        int messageId,
         String sender,
         String[] receivers,
         boolean requiresAck,
         boolean requiresResponse,
-        String callbackId,
+        int callbackId,
         long publishTime
 ) implements IRedisPacketMetadata {
 
@@ -35,12 +34,12 @@ public record RedisPacketMetadata(
              DataOutputStream dos = new DataOutputStream(bos)) {
             dos.writeInt(packetId);
             dos.writeInt(messageTypeId);
-            ByteUtils.writeString(dos, messageId);
+            dos.writeInt(messageId);
             ByteUtils.writeString(dos, sender);
             ByteUtils.writeStringArray(dos, receivers);
             dos.writeBoolean(requiresAck);
             dos.writeBoolean(requiresResponse);
-            ByteUtils.writeString(dos, callbackId);
+            dos.writeInt(callbackId);
             dos.writeLong(publishTime);
             return bos.toByteArray();
         } catch (IOException e) {
@@ -53,12 +52,12 @@ public record RedisPacketMetadata(
              DataInputStream dis = new DataInputStream(bis)) {
             int packetId = dis.readInt();
             int messageTypeId = dis.readInt();
-            String messageId = ByteUtils.readString(dis);
+            int messageId = dis.readInt();
             String sender = ByteUtils.readString(dis);
             String[] receivers = ByteUtils.readStringArray(dis);
             boolean requiresAck = dis.readBoolean();
             boolean requiresResponse = dis.readBoolean();
-            String callbackId = ByteUtils.readString(dis);
+            int callbackId = dis.readInt();
             long publishTime = dis.readLong();
             return new RedisPacketMetadata(packetId, messageTypeId, messageId, sender, receivers, requiresAck, requiresResponse, callbackId, publishTime);
         } catch (IOException e) {

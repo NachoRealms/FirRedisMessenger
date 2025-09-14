@@ -4,7 +4,6 @@ import io.netty.handler.codec.DecoderException;
 import io.netty.handler.codec.EncoderException;
 import lombok.Getter;
 import lombok.Setter;
-import top.catnies.firredismessenger.pubsub.packet.IRedisPacket;
 import top.catnies.firredismessenger.pubsub.packet.IRedisPacketMetadata;
 import top.catnies.firredismessenger.pubsub.packet.IRedisPayloadPacket;
 import top.catnies.firredismessenger.pubsub.packet.RedisPacketCoder;
