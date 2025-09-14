@@ -4,7 +4,6 @@ import io.lettuce.core.RedisClient;
 import io.lettuce.core.api.StatefulRedisConnection;
 import lombok.Getter;
 import top.catnies.firredismessenger.pubsub.RedisPubSubManager;
-import top.catnies.firredismessenger.queue.RedisStreamManager;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,7 +18,6 @@ public class RedisManager {
 
     /* 关联对象 */
     @Getter private RedisPubSubManager pubSubManager;
-    @Getter private RedisStreamManager streamManager;
 
     // TODO 是否要避免多个相同ID的服务器进行连接?
     public RedisManager(RedisUri connectUri, String serverId) {
@@ -39,7 +37,6 @@ public class RedisManager {
             // PubSub 模块功能
             pubSubManager = new RedisPubSubManager(this);
             // Stream 模块功能
-            streamManager = new RedisStreamManager(this);
 
             System.out.println("Redis connection established.");
         } catch (Exception e) {
