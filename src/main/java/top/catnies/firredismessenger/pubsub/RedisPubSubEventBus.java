@@ -6,6 +6,7 @@ import top.catnies.firredismessenger.pubsub.packet.IRedisPacket;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -14,7 +15,7 @@ public class RedisPubSubEventBus {
     // [频道: [消息Class -> [主题: [处理器(自带权重)] ]]
     private final Map<String, Map<Class<? extends IRedisPacket>, Map<String, CopyOnWriteArrayList<HandlerWrapper<?>>>>> handlers = new ConcurrentHashMap<>();
     // [频道: [消息Class -> [主题: [处理器(自带权重)] ]]
-    private final Map<String, Map<Class<? extends IRedisPacket>, Map<String, ResponseHandlerWrapper<?>>>> responseHandlers = new ConcurrentHashMap<>();
+    private final Map<String, Map<Class<? extends IRedisPacket>, Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>>>> responseHandlers = new ConcurrentHashMap<>();
     // 通过 Listener 实现类继承的所有监听器
     private final Map<RedisListener, Set<Object>> registeredListeners = new ConcurrentHashMap<>();
     // 接收消息处理的线程池
@@ -54,7 +55,8 @@ public class RedisPubSubEventBus {
             String channel,
             Class<T> packetType,
             String subject,
-            Function<T, IRedisPacket> handler
+            BiFunction<T, IRedisPacket, IRedisPacket> handler,
+            int priority
     ) {}
 
     /**
@@ -92,21 +94,22 @@ public class RedisPubSubEventBus {
      * @return 回复数据包 （可能为 null）
      */
     public IRedisPacket handleResponsePacket(String channel, IRedisPacket packet) {
-        Map<Class<? extends IRedisPacket>, Map<String, ResponseHandlerWrapper<?>>> typeMap = responseHandlers.get(channel);
+        Map<Class<? extends IRedisPacket>, Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>>> typeMap = responseHandlers.get(channel);
         if (typeMap == null) return null;
-        Map<String, ResponseHandlerWrapper<?>> subjectMap = typeMap.get(packet.getClass());
+        Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>> subjectMap = typeMap.get(packet.getClass());
         if (subjectMap == null) return null;
         String subject = packet.getSubject();
-        ResponseHandlerWrapper<?> wrapper = subjectMap.get(subject);
-        if (wrapper == null) return null;
-        try {
+        CopyOnWriteArrayList<ResponseHandlerWrapper<?>> list = subjectMap.get(subject);
+        if (list == null) return null;
+
+        // 将上一个处理器处理好的回复包继续传递给下一个, 最终返回;
+        IRedisPacket handledPacket = null;
+        for (ResponseHandlerWrapper<?> wrapper : list) {
             @SuppressWarnings("unchecked")
-            Function<IRedisPacket, IRedisPacket> handler = (Function<IRedisPacket, IRedisPacket>) wrapper.handler();
-            return handler.apply(packet);
-        } catch (Exception e) {
-            e.printStackTrace();
-            return null;
+            BiFunction<IRedisPacket, IRedisPacket, IRedisPacket> handler = (BiFunction<IRedisPacket, IRedisPacket, IRedisPacket>) wrapper.handler();
+            handledPacket = handler.apply(packet, handledPacket);
         }
+        return handledPacket;
     }
 
     /**
@@ -145,12 +148,14 @@ public class RedisPubSubEventBus {
             }
             // Response handler 注销
             else if (wrapperObj instanceof ResponseHandlerWrapper<?> wrapper) {
-                Map<Class<? extends IRedisPacket>, Map<String, ResponseHandlerWrapper<?>>> typeMap =
+                Map<Class<? extends IRedisPacket>, Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>>> typeMap =
                         responseHandlers.get(wrapper.channel());
                 if (typeMap == null) continue;
-                Map<String, ResponseHandlerWrapper<?>> subjectMap = typeMap.get(wrapper.packetType());
+                Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>> subjectMap = typeMap.get(wrapper.packetType());
                 if (subjectMap == null) continue;
-                subjectMap.remove(wrapper.subject());
+                CopyOnWriteArrayList<ResponseHandlerWrapper<?>> list = subjectMap.get(wrapper.subject());
+                if (list == null) continue;
+                list.removeIf(h -> h.handler().equals(wrapper.handler()));
             }
         }
     }
@@ -206,18 +211,23 @@ public class RedisPubSubEventBus {
      * @param channel 频道
      * @param packetType 消息类型
      * @param subject 主题
-     * @param handler 回调处理器
+     * @param handler 处理器
      */
     public <T extends IRedisPacket> void registerResponseHandler(
             String channel,
             Class<T> packetType,
             String subject,
-            Function<T, IRedisPacket> handler
+            BiFunction<T, IRedisPacket, IRedisPacket> handler,
+            int priority
     ) {
         responseHandlers
                 .computeIfAbsent(channel, c -> new ConcurrentHashMap<>())
                 .computeIfAbsent(packetType, t -> new ConcurrentHashMap<>())
-                .put(subject, new ResponseHandlerWrapper<>(channel, packetType, subject, handler));
+                .computeIfAbsent(subject, s -> new CopyOnWriteArrayList<>())
+                .add(new ResponseHandlerWrapper<>(channel, packetType, subject, handler, priority));
+        // 排序: 优先级高的在前
+        responseHandlers.get(channel).get(packetType).get(subject)
+                .sort((a, b) -> Integer.compare(b.priority, a.priority));
     }
 
     /**
@@ -225,19 +235,21 @@ public class RedisPubSubEventBus {
      * @param channel 频道
      * @param packetType 消息类型
      * @param subject 主题
+     * @param handler 处理器
      */
     public <T extends IRedisPacket> void unregisterResponseHandler(
             String channel,
             Class<T> packetType,
-            String subject
+            String subject,
+            BiFunction<T, IRedisPacket, IRedisPacket> handler
     ) {
-        Map<Class<? extends IRedisPacket>, Map<String, ResponseHandlerWrapper<?>>> typeMap = responseHandlers.get(channel);
-        if (typeMap != null) {
-            Map<String, ResponseHandlerWrapper<?>> subjectMap = typeMap.get(packetType);
-            if (subjectMap != null) {
-                subjectMap.remove(subject);
-            }
-        }
+        Map<Class<? extends IRedisPacket>, Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>>> typeMap = responseHandlers.get(channel);
+        if (typeMap == null) return;
+        Map<String, CopyOnWriteArrayList<ResponseHandlerWrapper<?>>> subjectMap = typeMap.get(packetType);
+        if (subjectMap == null) return;
+        CopyOnWriteArrayList<ResponseHandlerWrapper<?>> list = subjectMap.get(subject);
+        if (list == null) return;
+        list.removeIf(h -> h.handler().equals(handler));
     }
 
     /**
@@ -282,8 +294,9 @@ public class RedisPubSubEventBus {
                 .computeIfAbsent(packetType, t -> new ConcurrentHashMap<>())
                 .computeIfAbsent(subject, s -> new CopyOnWriteArrayList<>())
                 .add(wrapper);
+        // 排序: 优先级高的在前
         handlers.get(channel).get(packetType).get(subject)
-                .sort((a, b) -> Integer.compare(b.priority(), a.priority()));
+                .sort((a, b) -> Integer.compare(b.priority, a.priority));
 
         // 保存到 registeredListeners 用于反注册
         registeredListeners.computeIfAbsent(listener, k -> ConcurrentHashMap.newKeySet()).add(wrapper);
@@ -301,8 +314,8 @@ public class RedisPubSubEventBus {
      */
     private <T extends IRedisPacket> void registerResponseMethod(RedisListener listener, Method method) {
         // 参数只能有一个
-        if (method.getParameterCount() != 1 || !IRedisPacket.class.isAssignableFrom(method.getParameterTypes()[0])) {
-            throw new IllegalArgumentException("RedisListener 内部 RedisResponseHandler 的方法只能有一个参数, 并且参数必须是 IRedisPacket 的实现类喵!");
+        if (method.getParameterCount() != 2 || !IRedisPacket.class.isAssignableFrom(method.getParameterTypes()[0])) {
+            throw new IllegalArgumentException("RedisListener 内部 RedisResponseHandler 的方法只能有2个参数, 第一个是接收到的数据包, 第二个是准备回复的数据包, 并且参数必须是 IRedisPacket 的实现类喵!");
         }
         if (!IRedisPacket.class.isAssignableFrom(method.getReturnType())) {
             throw new IllegalArgumentException("RedisListener 内部 RedisResponseHandler 方法必须返回一个 IRedisPacket 喵!");
@@ -314,39 +327,34 @@ public class RedisPubSubEventBus {
         RedisResponseHandler annotation = method.getAnnotation(RedisResponseHandler.class);
         String subject = annotation.subject();
         String channel = annotation.channel();
+        int priority = annotation.priority();
         boolean autoSubscribe = annotation.autoSubscribe();
 
-        // 唯一性检查
-        Map<Class<? extends IRedisPacket>, Map<String, ResponseHandlerWrapper<?>>> typeMap =
-                responseHandlers.computeIfAbsent(channel, c -> new ConcurrentHashMap<>());
-        Map<String, ResponseHandlerWrapper<?>> subjectMap =
-                typeMap.computeIfAbsent(packetType, t -> new ConcurrentHashMap<>());
-        if (subjectMap.containsKey(subject)) {
-            throw new IllegalStateException(
-                    String.format(
-                            "重复注册 RedisResponseHandler: channel=%s, packetType=%s, subject=%s，已存在的处理器来自 %s",
-                            channel, packetType.getName(), subject,
-                            subjectMap.get(subject) // 输出已有 handler 信息
-                    )
-            );
-        }
-
         // 调用目标方法
-        Function<T, IRedisPacket> handler = packet -> {
+        BiFunction<T, IRedisPacket, IRedisPacket> handler = (packet, responsePacket) -> {
             try {
                 method.setAccessible(true);
-                return (IRedisPacket) method.invoke(listener, packet);
+                return (IRedisPacket) method.invoke(listener, packet, responsePacket);
             } catch (Exception e) {
                 System.err.println("Error in Redis message response handler: " + e.getMessage());
                 return null;
             }
         };
 
-        // 保存到 registerResponseHandler 用于反注册
+        // 创建处理器对象, 保存到 registerResponseHandler 用于反注册
+        ResponseHandlerWrapper<T> wrapper = new ResponseHandlerWrapper<>(channel, packetType, subject, handler, priority);
+
+        // 在 responseHandlers 主表注册, 排序保证优先级
         responseHandlers
                 .computeIfAbsent(channel, c -> new ConcurrentHashMap<>())
                 .computeIfAbsent(packetType, t -> new ConcurrentHashMap<>())
-                .put(subject, new ResponseHandlerWrapper<>(channel, packetType, subject, handler));
+                .computeIfAbsent(subject, s -> new CopyOnWriteArrayList<>())
+                .add(wrapper);
+        responseHandlers.get(channel).get(packetType).get(subject)
+                .sort((a, b) -> Integer.compare(b.priority, a.priority));
+
+        // 保存到 registeredListeners 用于反注册
+        registeredListeners.computeIfAbsent(listener, k -> ConcurrentHashMap.newKeySet()).add(wrapper);
 
         // 自动订阅频道
         if (autoSubscribe && !pubSubManager.isSubscribed(channel)) {

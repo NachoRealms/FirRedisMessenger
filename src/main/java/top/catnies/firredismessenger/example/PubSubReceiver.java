@@ -6,6 +6,7 @@ import top.catnies.firredismessenger.RedisUri;
 import top.catnies.firredismessenger.pubsub.RedisHandler;
 import top.catnies.firredismessenger.pubsub.RedisListener;
 import top.catnies.firredismessenger.pubsub.RedisResponseHandler;
+import top.catnies.firredismessenger.pubsub.packet.IRedisPacket;
 import top.catnies.firredismessenger.pubsub.packet.impl.StringRedisPacket;
 
 import java.util.Random;
@@ -34,11 +35,21 @@ public class PubSubReceiver {
             System.out.println(payload);
         }
 
-        @RedisResponseHandler(channel = "qwq", subject = "aaa")
-        public StringRedisPacket onResponsePacket(StringRedisPacket packet) {
+        @RedisResponseHandler(channel = "qwq", subject = "aaa", priority = 2)
+        public IRedisPacket onResponsePacket(StringRedisPacket packet, IRedisPacket responsePacket) {
             // 随机给回复一个数字
             int i = new Random().nextInt();
             return new StringRedisPacket("bbb", String.valueOf(i));
+        }
+
+        @RedisResponseHandler(channel = "qwq", subject = "aaa", priority = 1)
+        public IRedisPacket onResponsePacket2(StringRedisPacket packet, IRedisPacket responsePacket) {
+            // 给包里加点料
+            if (responsePacket instanceof StringRedisPacket stringRedisPacket) {
+                stringRedisPacket.setPayload(stringRedisPacket.getPayload() + "料料!");
+                return stringRedisPacket;
+            }
+            return responsePacket;
         }
     }
 
