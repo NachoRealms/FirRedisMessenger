@@ -16,22 +16,26 @@ public class StringRedisCallbackPacket extends AbstractCallbackPacket<String> {
                 ByteBufUtils.writeString(byteBuf, packet.getSubject());
                 ByteBufUtils.writeString(byteBuf, packet.getPayload());
                 byteBuf.writeInt(packet.getCallbackId());
+                ByteBufUtils.writeString(byteBuf, packet.getSender());
+                ByteBufUtils.writeStringArray(byteBuf, packet.getReceivers());
             },
             // 解码
             (byteBuf) -> {
                 String subject = ByteBufUtils.readString(byteBuf);
                 String payload = ByteBufUtils.readString(byteBuf);
+                int callbackId = byteBuf.readInt();
+                String sender = ByteBufUtils.readString(byteBuf);
+                String[] receivers = ByteBufUtils.readStringArray(byteBuf);
+
                 StringRedisCallbackPacket packet = new StringRedisCallbackPacket(subject, payload);
-                packet.setCallbackId(byteBuf.readInt());
+                packet.setCallbackId(callbackId);
+                packet.setSender(sender);
+                packet.setReceivers(receivers);
                 return packet;
             }
     );
 
     private static int packetId;
-
-    private String subject;
-    private String payload;
-    private int callbackId;
 
     public StringRedisCallbackPacket(String subject, String payload) {
         super(subject, payload);

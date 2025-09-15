@@ -145,6 +145,7 @@ public class RedisPubSubManager {
         if (IRedisResponsePacket.class.isAssignableFrom(packet.getClass())) {
             IRedisResponsePacket responsePacket = (IRedisResponsePacket) packet;
             responsePacket.setMessageId(messageId);
+            responsePacket.setSender(redisManager.getServerId());
 
             // 注册回复回调和超时回调
             if (responseCallback != null) {

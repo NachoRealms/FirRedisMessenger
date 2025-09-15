@@ -1,10 +1,14 @@
 package top.catnies.firredismessenger;
 
+import io.lettuce.core.ClientOptions;
 import io.lettuce.core.RedisClient;
+import io.lettuce.core.SocketOptions;
+import io.lettuce.core.TimeoutOptions;
 import io.lettuce.core.api.StatefulRedisConnection;
 import lombok.Getter;
 import top.catnies.firredismessenger.pubsub.RedisPubSubManager;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -32,7 +36,16 @@ public class RedisManager {
             // 创建 Redis 链接
             redisClient = RedisClient.create(connectUri.redisUri());
             connection = redisClient.connect();
+            redisClient.setOptions(ClientOptions.builder()
+                    .autoReconnect(true) // 允许自动重连
+                    .socketOptions(SocketOptions.builder()
+                            .connectTimeout(Duration.ofSeconds(10))
+                            .build())
+                    .timeoutOptions(TimeoutOptions.enabled(Duration.ofSeconds(5)))
+                    .build()
+            );
             assert connection != null;
+
             // 缓存 模块功能
             // PubSub 模块功能
             pubSubManager = new RedisPubSubManager(this);

@@ -61,15 +61,15 @@ public class PubSubModule {
             return new StringRedisCallbackPacket("bbb", String.valueOf(i));
         }
 
-        @RedisResponseHandler(channel = "qwq", subject = "aaa", priority = 1)
-        public IRedisCallbackPacket onResponsePacket2(StringRedisResponsePacket packet, IRedisCallbackPacket responsePacket) {
-            // 给包里加点料
-            if (responsePacket instanceof StringRedisCallbackPacket stringRedisPacket) {
-                stringRedisPacket.setPayload(stringRedisPacket.getPayload() + "料料!");
-                return stringRedisPacket;
-            }
-            return responsePacket;
-        }
+//        @RedisResponseHandler(channel = "qwq", subject = "aaa", priority = 1)
+//        public IRedisCallbackPacket onResponsePacket2(StringRedisResponsePacket packet, IRedisCallbackPacket responsePacket) {
+//            // 给包里加点料
+//            if (responsePacket instanceof StringRedisCallbackPacket stringRedisPacket) {
+//                stringRedisPacket.setPayload(stringRedisPacket.getPayload() + "料料!");
+//                return stringRedisPacket;
+//            }
+//            return responsePacket;
+//        }
     }
 
 }
