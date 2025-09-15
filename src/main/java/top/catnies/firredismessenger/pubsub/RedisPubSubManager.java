@@ -166,6 +166,7 @@ public class RedisPubSubManager {
     public void publishResponsePacket(@NotNull String channel, @NotNull IRedisResponsePacket originPacket, @NotNull IRedisCallbackPacket callbackPacket) {
         int callbackId = originPacket.getMessageId();
         callbackPacket.setCallbackId(callbackId);
+        callbackPacket.setReceivers(new String[]{ originPacket.getSender() });
         int messageId = nextMessageId();
 
         // 序列化消息, 发布消息

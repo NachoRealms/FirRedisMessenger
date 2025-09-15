@@ -2,13 +2,12 @@ package top.catnies.firredismessenger.pubsub.packet.impl;
 
 import lombok.Getter;
 import lombok.Setter;
-import top.catnies.firredismessenger.pubsub.packet.IRedisPayloadPacket;
 import top.catnies.firredismessenger.pubsub.packet.RedisPacketCodec;
 import top.catnies.firredismessenger.util.ByteBufUtils;
 
 @Getter
 @Setter
-public class StringRedisPacket implements IRedisPayloadPacket<String> {
+public class StringRedisPacket extends AbstractBroadcastPacket<String> {
 
     // 序列化器
     public static final RedisPacketCodec.IRedisPacketCodec<StringRedisPacket> CODEC = RedisPacketCodec.of(
@@ -29,15 +28,8 @@ public class StringRedisPacket implements IRedisPayloadPacket<String> {
 
     private static int packetId;
 
-    private String subject;
-    private String payload;
-
-    public StringRedisPacket(
-            String subject,
-            String payload
-    ) {
-        this.subject = subject;
-        this.payload = payload;
+    public StringRedisPacket(String subject, String payload) {
+        super(subject, payload);
     }
 
     @Override

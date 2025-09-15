@@ -24,7 +24,7 @@ public class PubSubModule {
         while (true) {
             Thread.sleep(1000);
 
-            StringRedisResponsePacket packet = new StringRedisResponsePacket("aaa", "bbb");
+            StringRedisResponsePacket packet = new StringRedisResponsePacket("aaa", "bbb", null);
             redisManager.getPubSubManager()
                 .publishPacket(
                     // 目标频道
@@ -58,7 +58,7 @@ public class PubSubModule {
         public IRedisCallbackPacket onResponsePacket(StringRedisResponsePacket packet, IRedisCallbackPacket responsePacket) {
             // 随机给回复一个数字
             int i = new Random().nextInt();
-            return StringRedisCallbackPacket.of("bbb", String.valueOf(i));
+            return new StringRedisCallbackPacket("bbb", String.valueOf(i));
         }
 
         @RedisResponseHandler(channel = "qwq", subject = "aaa", priority = 1)

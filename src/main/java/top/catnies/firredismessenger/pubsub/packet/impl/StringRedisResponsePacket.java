@@ -2,14 +2,12 @@ package top.catnies.firredismessenger.pubsub.packet.impl;
 
 import lombok.Getter;
 import lombok.Setter;
-import top.catnies.firredismessenger.pubsub.packet.IRedisPayloadPacket;
-import top.catnies.firredismessenger.pubsub.packet.IRedisResponsePacket;
 import top.catnies.firredismessenger.pubsub.packet.RedisPacketCodec;
 import top.catnies.firredismessenger.util.ByteBufUtils;
 
 @Getter
 @Setter
-public class StringRedisResponsePacket implements IRedisPayloadPacket<String>, IRedisResponsePacket {
+public class StringRedisResponsePacket extends AbstractResponsePacket<String> {
 
     // 序列化器
     public static final RedisPacketCodec.IRedisPacketCodec<StringRedisResponsePacket> CODEC = RedisPacketCodec.of(
@@ -29,7 +27,7 @@ public class StringRedisResponsePacket implements IRedisPayloadPacket<String>, I
                 String sender = ByteBufUtils.readString(byteBuf);
                 String[] receivers = ByteBufUtils.readStringArray(byteBuf);
 
-                StringRedisResponsePacket packet = new StringRedisResponsePacket(subject, payload);
+                StringRedisResponsePacket packet = new StringRedisResponsePacket(subject, payload, receivers);
                 packet.setMessageId(messageId);
                 packet.setSender(sender);
                 packet.setReceivers(receivers);
@@ -39,18 +37,8 @@ public class StringRedisResponsePacket implements IRedisPayloadPacket<String>, I
 
     private static int packetId;
 
-    private String subject;
-    private String payload;
-    private int messageId;
-    private String sender;
-    private String[] receivers;
-
-    public StringRedisResponsePacket(
-        String subject,
-        String payload
-    ) {
-        this.subject = subject;
-        this.payload = payload;
+    public StringRedisResponsePacket(String subject, String payload, String[] receivers) {
+        super(subject, payload, receivers);
     }
 
     @Override
