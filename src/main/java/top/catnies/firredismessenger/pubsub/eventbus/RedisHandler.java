@@ -1,4 +1,4 @@
-package top.catnies.firredismessenger.pubsub;
+package top.catnies.firredismessenger.pubsub.eventbus;
 
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;

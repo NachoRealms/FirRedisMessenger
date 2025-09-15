@@ -4,11 +4,10 @@ package top.catnies.firredismessenger.pubsub.packet;
 public interface IRedisPacket {
 
     /**
-     * 获取数据包的元数据信息
-     * @return 元数据信息
+     * 数据包类型的唯一ID, 每一种数据包实现只对应一个ID
+     * @return 数据包ID
      */
-    IRedisPacketMetadata getMetadata();
-    void setMetadata(IRedisPacketMetadata metadata);
+    int getPacketId();
 
     /**
      * 获取消息主题
@@ -16,4 +15,5 @@ public interface IRedisPacket {
      */
     String getSubject();
     void setSubject(String subject);
+
 }

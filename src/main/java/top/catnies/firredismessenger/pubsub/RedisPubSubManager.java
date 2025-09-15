@@ -4,14 +4,17 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.codec.ByteArrayCodec;
 import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import top.catnies.firredismessenger.RedisManager;
+import top.catnies.firredismessenger.pubsub.eventbus.RedisPubSubEventBus;
 import top.catnies.firredismessenger.pubsub.packet.*;
-import top.catnies.firredismessenger.pubsub.packet.impl.AckRedisPacket;
 
-import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,8 +22,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 public class RedisPubSubManager {
-    public static final String[] ALL_RECEIVERS = {"*"}; // 表示消息发送给所有接收方
-
     /* 维护数据 */
     @Getter private final StatefulRedisConnection<byte[], byte[]> connection; // 发布消息
     @Getter private final StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection; // 发布订阅连接
@@ -45,51 +46,54 @@ public class RedisPubSubManager {
         this.connection = redisManager.getRedisClient().connect(ByteArrayCodec.INSTANCE);
         this.pubSubConnection = redisManager.getRedisClient().connectPubSub(ByteArrayCodec.INSTANCE);
         // 初始化对象
-        this.callbackManager = new RedisPubSubCallback();
+        this.callbackManager = new RedisPubSubCallback(this);
         this.messageEventBus = new RedisPubSubEventBus(this);
-        this.packetRegistry = new RedisPacketRegistry();
+        this.packetRegistry = new RedisPacketRegistry(this);
         // 注册监听器
         pubSubConnection.addListener(new RedisPubSubAdapter<>() {
             @Override
             public void message(byte[] channel, byte[] message) {
                 String channelStr = new String(channel, StandardCharsets.UTF_8);
+
+                // 解码数据包 -> [id], [payload]
                 IRedisPacket packet = decodePacket(message);
-                // 看看这个消息是不是发给自己的;
-                for (String receiver : packet.getMetadata().receivers()) {
-                    if (receiver.equals("*") || receiver.equals(redisManager.getServerId())) {
-                        break;
+
+                // 如果是携带接收者的数据包
+                if (packet instanceof IRedisReceiverPacket receiverPacket) {
+                    boolean shouldIgnore = true;
+                    String[] receivers = receiverPacket.getReceivers();
+                    // 空数组代表广播, 需要接收;
+                    if (receivers == null || receivers.length == 0) {
+                        shouldIgnore = false;
                     }
-                    return;
-                }
-                // 如果是正常消息;
-                RedisMessageType messageType = RedisMessageType.byId(packet.getMetadata().messageTypeId());
-                if (messageType == RedisMessageType.PUBLISH) {
-                    // 如果需要ACK则自动回复;
-                    if (packet.getMetadata().requiresAck()) {
-                        publishAckPacket(channelStr, packet);
-                    }
-                    // 如果需要Response的则交给回复处理器, 然后自动回复;
-                    if (packet.getMetadata().requiresResponse()) {
-                        IRedisPacket iRedisPacket = messageEventBus.handleResponsePacket(channelStr, packet);
-                        if (iRedisPacket != null) {
-                            publishResponsePacket(channelStr, packet, iRedisPacket);
+                    // 检查自己是不是接收者;
+                    else {
+                        for (String receiver : receivers) {
+                            if (receiver.equals(redisManager.getServerId())) {
+                                shouldIgnore = false;
+                                break;
+                            }
                         }
                     }
-                    // 否则就正常处理消息喵;
-                    messageEventBus.handlePublishPacket(channelStr, packet);
+                    if (shouldIgnore) return;
+                }
+
+                // 判断是否是回调数据包, 如果是则走回调;
+                if (packet instanceof IRedisCallbackPacket callbackPacket) {
+                    callbackManager.completeResponse(callbackPacket.getCallbackId(), packet);
                     return;
                 }
-                // 如果是ACK消息, 触发ACK回调;
-                if (messageType == RedisMessageType.ACK) {
-                    int callbackId = packet.getMetadata().callbackId();
-                    callbackManager.completeAck(callbackId);
-                    return;
+
+                // 如果是需要回复的数据包, 则分发给 @RedisResponseHandler;
+                if (packet instanceof IRedisResponsePacket originPacket) {
+                    IRedisCallbackPacket callbackPacket = messageEventBus.handleResponsePacket(channelStr, packet);
+                    if (callbackPacket != null) {
+                        publishResponsePacket(channelStr, originPacket, callbackPacket);
+                    }
                 }
-                // 如果是RESPONSE消息, 触发RESPONSE回调;
-                if (messageType == RedisMessageType.RESPONSE) {
-                    int callbackId = packet.getMetadata().callbackId();
-                    callbackManager.completeResponse(callbackId, packet);
-                }
+
+                // 正常处理消息, 分发给 @RedisHandler;
+                messageEventBus.handlePublishPacket(channelStr, packet);
             }
         });
     }
@@ -124,153 +128,99 @@ public class RedisPubSubManager {
     /**
      * 发布一个 Redis 数据包;
      * @param channel 目标频道
-     * @param receivers 接收者们的ID, 如果使用 * 代表全部;
      * @param packet 数据包
-     * @param ackCallback 当收到ACK时, 触发的回调;
      * @param responseCallback 当收到回复时, 触发的回调;
      * @param timeoutMillis 多久没收到ACK/RESPONSE时触发超时回调;
      * @param timeoutCallback 当数据包超时时, 触发的回调(需要ack/response至少一个为true)
      */
     public void publishPacket(
             @NotNull String channel,
-            @NotNull String[] receivers,
             @NotNull IRedisPacket packet,
-            @Nullable Runnable ackCallback,
             @Nullable Consumer<IRedisPacket> responseCallback,
             long timeoutMillis,
             @Nullable Runnable timeoutCallback
     ) {
-        // 完善数据包
-        boolean requireAck = ackCallback != null;
-        boolean requireResponse = responseCallback != null;
-        int packetId = packetRegistry.getPacketId(packet.getClass());
-        RedisPacketMetadata metadata = new RedisPacketMetadata(
-                packetId,
-                RedisMessageType.PUBLISH.id(),
-                nextMessageId(),
-                redisManager.getServerId(),
-                receivers,
-                requireAck,
-                requireResponse,
-                -1,
-                System.currentTimeMillis()
-        );
-        // 创建回调
-        RedisPacketFuture redisPacketFuture = new RedisPacketFuture();
-        // 注册ACK回调任务
-        if (requireAck) redisPacketFuture.onAck(ackCallback);
-        // 注册回复回调任务
-        if (requireResponse) redisPacketFuture.onResponse(responseCallback);
-        // 注册超时回调任务
-        callbackManager.register(metadata.messageId(), redisPacketFuture, timeoutMillis, timeoutCallback);
-        // 序列化消息
-        packet.setMetadata(metadata);
-        byte[] encodedPacket = encodePacket(packet);
-        // 发布消息
-        connection.async().publish(channel.getBytes(StandardCharsets.UTF_8), encodedPacket);
-    }
+        // 如果是需要回复的数据包, 往内部自动注入消息ID, 然后创建回调任务;
+        int messageId = nextMessageId();
+        if (IRedisResponsePacket.class.isAssignableFrom(packet.getClass())) {
+            IRedisResponsePacket responsePacket = (IRedisResponsePacket) packet;
+            responsePacket.setMessageId(messageId);
 
-    /**
-     * 发布一个 ACK 数据包
-     * @param channel 目标频道
-     * @param originPacket 需要回复的原始数据包
-     */
-    public void publishAckPacket(@NotNull String channel, @NotNull IRedisPacket originPacket) {
-        // 完善ACK数据包
-        AckRedisPacket packet = new AckRedisPacket();
-        int packetId = packetRegistry.getPacketId(packet.getClass());
-        RedisPacketMetadata metadata = new RedisPacketMetadata(
-                packetId,
-                RedisMessageType.ACK.id(),
-                nextMessageId(),
-                redisManager.getServerId(),
-                new String[]{originPacket.getMetadata().sender()},
-                false,
-                false,
-                originPacket.getMetadata().messageId(),
-                System.currentTimeMillis()
-        );
-        // 序列化消息
-        packet.setMetadata(metadata);
-        byte[] encodedPacket = encodePacket(packet);
-        // 发布消息
-        connection.async().publish(channel.getBytes(StandardCharsets.UTF_8), encodedPacket);
+            // 注册回复回调和超时回调
+            if (responseCallback != null) {
+                callbackManager.register(messageId, responseCallback, timeoutMillis, timeoutCallback);
+            }
+        }
+
+        // 序列化消息, 发布消息
+        byte[] bytes = encodePacket(packet);
+        connection.async().publish(channel.getBytes(StandardCharsets.UTF_8), bytes);
     }
 
     /**
      * 发布一个 RESPONSE 数据包
      * @param channel 目标频道
      * @param originPacket 原始数据包
-     * @param responsePacket 回复的数据包
+     * @param callbackPacket 回复的数据包
      */
-    public void publishResponsePacket(@NotNull String channel, @NotNull IRedisPacket originPacket, @NotNull IRedisPacket responsePacket) {
-        // 完善数据包
-        int packetId = packetRegistry.getPacketId(responsePacket.getClass());
-        RedisPacketMetadata metadata = new RedisPacketMetadata(
-                packetId,
-                RedisMessageType.RESPONSE.id(),
-                nextMessageId(),
-                redisManager.getServerId(),
-                new String[]{originPacket.getMetadata().sender()},
-                false,
-                false,
-                originPacket.getMetadata().messageId(),
-                System.currentTimeMillis()
-        );
-        // 序列化消息
-        responsePacket.setMetadata(metadata);
-        byte[] encodedPacket = encodePacket(responsePacket);
-        // 发布消息
-        connection.async().publish(channel.getBytes(StandardCharsets.UTF_8), encodedPacket);
+    public void publishResponsePacket(@NotNull String channel, @NotNull IRedisResponsePacket originPacket, @NotNull IRedisCallbackPacket callbackPacket) {
+        int callbackId = originPacket.getMessageId();
+        callbackPacket.setCallbackId(callbackId);
+        int messageId = nextMessageId();
+
+        // 序列化消息, 发布消息
+        byte[] bytes = encodePacket(callbackPacket);
+        connection.async().publish(channel.getBytes(StandardCharsets.UTF_8), bytes);
     }
 
-
-    // 协议格式: <metadataBytesLength:int>  <metadataBytes>  <packetBodyBytes>
-    // 统一的序列化
-    private byte[] encodePacket(IRedisPacket packet) {
-        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
-             DataOutputStream dos = new DataOutputStream(bos)) {
-            // 先将meta进行序列化
-            IRedisPacketMetadata metadata = packet.getMetadata();
-            byte[] metadataBytes = ((RedisPacketMetadata) metadata).toBytes();
-            // 从packetId可以找到coder, 再将消息的body进行序列化
-            // noinspection unchecked
-            RedisPacketCoder.IRedisPacketCoder<IRedisPacket> coder = (RedisPacketCoder.IRedisPacketCoder<IRedisPacket>) packetRegistry.getPacketCoder(metadata.packetId());
-            if (coder == null) {
-                throw new IllegalArgumentException("Packet " + packet.getClass().getName() + " is not registered coder");
-            }
-            byte[] bodyBytes = coder.encode(packet);
-            // 写入 metadata length, metadata, body
-            dos.writeInt(metadataBytes.length);
-            dos.write(metadataBytes);
-            dos.write(bodyBytes);
-            return bos.toByteArray();
-        } catch (IOException e) {
-            throw new RuntimeException("Encoding packet failed", e);
+    /**
+     * 序列化数据包, 将数据包转成 Byte[]; <br>
+     * 协议格式: packetId:int + packetBodyBytes
+     *
+     * @param packet 需要序列化的数据包
+     * @return 字节数组
+     */
+    private <P extends IRedisPacket> byte[] encodePacket(P packet) {
+        // 寻找序列化器
+        // int packetId = packet.getPacketId();
+        int packetId = packetRegistry.getPacketId(packet.getClass());
+        RedisPacketCodec.IRedisPacketCodec<P> codec = (RedisPacketCodec.IRedisPacketCodec<P>) packetRegistry.getPacketCodec(packetId);
+        if (codec == null) {
+            throw new IllegalArgumentException("数据包 " + packet.getClass().getName() + " 没有在注册表注册过喵!");
         }
+
+        // 创建缓存区, 序列化入缓冲区;
+        ByteBuf byteBuf = PooledByteBufAllocator.DEFAULT.buffer(256);
+        byte[] bytes;
+        try {
+            byteBuf.writeInt(packetId);
+            codec.encode(packet, byteBuf);
+            bytes = ByteBufUtil.getBytes(byteBuf, 0, byteBuf.readableBytes(), false);
+        } finally {
+            byteBuf.release();
+        }
+
+        return bytes;
     }
 
-    // 统一的反序列化
-    private IRedisPacket decodePacket(byte[] data) {
-        try (ByteArrayInputStream bis = new ByteArrayInputStream(data);
-             DataInputStream dis = new DataInputStream(bis)) {
-            // 先读取 metadata length, 然后先反序列化metadata
-            int metadataLen = dis.readInt();
-            byte[] metadataBytes = new byte[metadataLen];
-            dis.readFully(metadataBytes);
-            RedisPacketMetadata metadata = RedisPacketMetadata.fromBytes(metadataBytes);
-            // 有了 metadata 就可以找 coder, 再反序列化body部分
-            RedisPacketCoder.IRedisPacketCoder<?> coder = packetRegistry.getPacketCoder(metadata.packetId());
-            if (coder == null) {
-                throw new IllegalArgumentException("No coder found for typeId " + metadata.messageTypeId());
+    /**
+     * 反序列化数据包, 将Byte[]转成IRedisPacket;
+     * @param message 字节数组
+     * @return 数据包
+     */
+    @SuppressWarnings("unchecked")
+    private <P extends IRedisPacket> P decodePacket(byte[] message) {
+        ByteBuf byteBuf = Unpooled.wrappedBuffer(message);
+        try {
+            int packetId = byteBuf.readInt();
+            RedisPacketCodec.IRedisPacketCodec<P> codec =
+                    (RedisPacketCodec.IRedisPacketCodec<P>) packetRegistry.getPacketCodec(packetId);
+            if (codec == null) {
+                throw new IllegalArgumentException("packetId=" + packetId + " 没有在注册表注册过喵!");
             }
-            byte[] bodyBytes = dis.readAllBytes();
-            IRedisPacket packet = coder.decode(bodyBytes);
-            // 最后组合起来就是完整的packet了
-            packet.setMetadata(metadata);
-            return packet;
-        } catch (IOException e) {
-            throw new RuntimeException("Decoding packet failed", e);
+            return codec.decode(byteBuf);
+        } finally {
+            byteBuf.release();
         }
     }
 
