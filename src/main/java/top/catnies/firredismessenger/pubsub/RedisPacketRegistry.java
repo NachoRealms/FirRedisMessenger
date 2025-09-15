@@ -7,6 +7,7 @@ import top.catnies.firredismessenger.pubsub.packet.IRedisPacket;
 import top.catnies.firredismessenger.pubsub.packet.RedisPacketCodec;
 import top.catnies.firredismessenger.pubsub.packet.impl.StringRedisCallbackPacket;
 import top.catnies.firredismessenger.pubsub.packet.impl.StringRedisPacket;
+import top.catnies.firredismessenger.pubsub.packet.impl.StringRedisResponsePacket;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -32,6 +33,7 @@ public class RedisPacketRegistry implements IRedisPacketRegistry {
     // 注册基本数据包
     public void registerBasePackets() {
         this.register(StringRedisPacket.class, StringRedisPacket.CODEC); // 基于String的RedisPacket.
+        this.register(StringRedisResponsePacket.class, StringRedisResponsePacket.CODEC); // 基于String的RedisPacket.
         this.register(StringRedisCallbackPacket.class, StringRedisCallbackPacket.CODEC); // 基于String的RedisPacket.
     }
 
